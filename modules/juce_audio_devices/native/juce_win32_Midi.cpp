@@ -740,12 +740,12 @@ public:
         if (! bleDeviceWatcher->start())
             throw std::runtime_error ("Failed to start the BLE device watcher");
 
-        inputDeviceWatcher.reset (new MidiIODeviceWatcher<IMidiInPortStatics> (midiInFactory));
+        inputDeviceWatcher.reset (new MidiIODeviceWatcher<IMidiInPortStatics> (midiInFactory, *bleDeviceWatcher));
 
         if (! inputDeviceWatcher->start())
             throw std::runtime_error ("Failed to start the midi input device watcher");
 
-        outputDeviceWatcher.reset (new MidiIODeviceWatcher<IMidiOutPortStatics> (midiOutFactory));
+        outputDeviceWatcher.reset (new MidiIODeviceWatcher<IMidiOutPortStatics> (midiOutFactory, *bleDeviceWatcher));
 
         if (! outputDeviceWatcher->start())
             throw std::runtime_error ("Failed to start the midi output device watcher");
@@ -1063,8 +1063,13 @@ private:
                 return false;
             }
 
+            HSTRING nameHst;
+            addedDeviceInfo->get_Name(&nameHst);
+
             auto deviceID = wrtWrapper->hStringToString (deviceIDHst);
-            JUCE_WINRT_MIDI_LOG ("Detected paired BLE device: " << deviceID);
+            auto deviceName = wrtWrapper->hStringToString(nameHst);
+            JUCE_WINRT_MIDI_LOG ("Detected paired BLE device: " << deviceID << ", " << deviceName);
+
 
             if (auto* containerIDValue = getValueFromDeviceInfo ("System.Devices.Aep.ContainerId", addedDeviceInfo))
             {
@@ -1077,8 +1082,10 @@ private:
                     if (auto* connectedValue = getValueFromDeviceInfo ("System.Devices.Aep.IsConnected", addedDeviceInfo))
                         info.isConnected = getBoolFromInspectable (*connectedValue);
 
-                    JUCE_WINRT_MIDI_LOG ("Adding BLE device: " << deviceID << " " << info.containerID
-                                         << " " << (info.isConnected ? "connected" : "disconnected"));
+                    JUCE_WINRT_MIDI_LOG("Adding BLE device: " << deviceID << " " << info.containerID << ", name: " << deviceName
+                                        << " " << (info.isConnected ? "connected" : "disconnected"));
+
+                    const ScopedLock lock(deviceChanges);
                     devices.set (deviceID, info);
 
                     return S_OK;
@@ -1148,8 +1155,12 @@ private:
 
             auto updatedDeviceId = wrtWrapper->hStringToString (updatedDeviceIdHstr);
 
-            JUCE_WINRT_MIDI_LOG ("Updating BLE device: " << updatedDeviceId);
+            bool is_connected = false;
+            if (auto* connectedValue = getValueFromDeviceInfo("System.Devices.Aep.IsConnected", updatedDeviceInfo))
+                is_connected = getBoolFromInspectable (*connectedValue);
 
+            JUCE_WINRT_MIDI_LOG ("Updating BLE device: " << updatedDeviceId << (is_connected ? " connected" : " disconnected"));
+            
             if (auto* connectedValue = getValueFromDeviceInfo ("System.Devices.Aep.IsConnected", updatedDeviceInfo))
             {
                 auto isConnected = getBoolFromInspectable (*connectedValue);
@@ -1220,8 +1231,9 @@ private:
     template <typename COMFactoryType>
     struct MidiIODeviceWatcher final   : private DeviceCallbackHandler
     {
-        MidiIODeviceWatcher (WinRTWrapper::ComPtr<COMFactoryType>& comFactory)
-            : factory (comFactory)
+        MidiIODeviceWatcher (WinRTWrapper::ComPtr<COMFactoryType>& comFactory, const BLEDeviceWatcher& bleWatcher)
+            : factory (comFactory),
+              bleDeviceWatcher(bleWatcher)
         {
         }
 
@@ -1366,10 +1378,34 @@ private:
 
             StringArray deviceNames, deviceIDs;
 
-            for (auto info : lastQueriedConnectedDevices.get())
+            // BLE MIDI devices that have been paired but are not currently connected to the system appear 
+            // as MIDI I/O ports anyway. We use the container ID  to match the MIDI device with a generic 
+            // BLE device and query it's connection status to see if it truly is available.
+            const auto is_available = [&](const auto& device_info)
             {
-                deviceNames.add (info.name);
-                deviceIDs  .add (info.containerID);
+                bool available = true;
+
+                const ScopedLock lock(bleDeviceWatcher.deviceChanges);
+
+                for (const auto& elem : bleDeviceWatcher.devices)
+                {
+                    if (elem.containerID == device_info.containerID)
+                    {
+                        available = elem.isConnected;
+                        break;
+                    }
+                }
+
+                return available;
+            };
+
+            for (const auto& info : lastQueriedConnectedDevices.get())
+            {
+                if (is_available(info))
+                {
+                    deviceNames.add (info.name);
+                    deviceIDs  .add (info.containerID);
+                }
             }
 
             deviceNames.appendNumbersToDuplicates (false, false, CharPointer_UTF8 ("-"), CharPointer_UTF8 (""));
@@ -1396,16 +1432,17 @@ private:
 
         WinRTMIDIDeviceInfo getWinRTDeviceInfoForDevice (const String& deviceIdentifier)
         {
-            auto devices = getAvailableDevices();
+            // Seem to need this in order for lastQueriedConnectedDevices to contain the correct entries...
+            getAvailableDevices();
 
-            for (int i = 0; i < devices.size(); ++i)
-                if (devices.getUnchecked (i).identifier == deviceIdentifier)
-                    return lastQueriedConnectedDevices.get()[i];
+            const auto& ds = lastQueriedConnectedDevices.get();
+            const auto it = std::find_if(ds.begin(), ds.end(), [&](const auto& d) { return d.containerID == deviceIdentifier; });
 
-            return {};
+            return it != ds.end() ? *it : WinRTMIDIDeviceInfo{};
         }
 
         WinRTWrapper::ComPtr<COMFactoryType>& factory;
+        const BLEDeviceWatcher& bleDeviceWatcher;
 
         Array<WinRTMIDIDeviceInfo> connectedDevices;
         CriticalSection deviceChanges;
@@ -1495,11 +1532,10 @@ private:
 
                 const ScopedLock lock (bleDeviceWatcher.deviceChanges);
 
-                HashMap<String, BLEDeviceWatcher::DeviceInfo>::Iterator iter (bleDeviceWatcher.devices);
-
-                while (iter.next())
+                // This is just a std::find_if, but for some reason HashMap::Iterator isn't assignable, and it doesn't compile...
+                for (const auto& d : bleDeviceWatcher.devices)
                 {
-                    if (iter.getValue().containerID == deviceInfo.containerID)
+                    if (d.containerID == deviceInfo.containerID)
                     {
                         isBLEDevice = true;
                         break;
@@ -1572,7 +1608,9 @@ private:
 
             if (midiPort == nullptr)
             {
-                JUCE_WINRT_MIDI_LOG ("Timed out waiting for midi input port creation");
+                JUCE_WINRT_MIDI_LOG("Timed out waiting for midi input port creation " + deviceInfo.deviceID);
+
+                throw std::runtime_error("Timed out waiting for midi input port creation");
                 return;
             }
 
