@@ -1479,19 +1479,23 @@ private:
             if (FAILED (hr))
                 return;
 
+            // It's entirely possible that the user deletes/closes the MIDI I/O port before this callback is fired.
             hr = asyncOp->put_Completed (Callback<IAsyncOperationCompletedHandler<COMType*>> (
-                [this] (IAsyncOperation<COMType*>* asyncOpPtr, AsyncStatus)
+                [wr = WeakReference(this)] (IAsyncOperation<COMType*>* asyncOpPtr, AsyncStatus)
                 {
-                    if (asyncOpPtr == nullptr)
-                        return E_ABORT;
+                    if (auto* r = wr.get())
+                    {
+                        if (asyncOpPtr == nullptr)
+                            return E_ABORT;
 
-                    auto hr = asyncOpPtr->GetResults (port.resetAndGetPointerAddress());
+                        auto hr = asyncOpPtr->GetResults (r->port.resetAndGetPointerAddress());
 
-                    if (FAILED (hr))
-                        return hr;
+                        if (FAILED (hr))
+                            return hr;
 
-                    portOpened.signal();
-                    return S_OK;
+                        r->portOpened.signal();
+                        return S_OK;
+                    }
                 }
             ).Get());
 
@@ -1504,6 +1508,8 @@ private:
         WinRTWrapper::ComPtr<COMFactoryType>& factory;
         WinRTWrapper::ComPtr<COMInterfaceType>& port;
         WaitableEvent portOpened { true };
+
+        JUCE_DECLARE_WEAK_REFERENCEABLE(OpenMidiPortThread)
     };
 
     //==============================================================================
@@ -1616,10 +1622,16 @@ private:
 
             startTime = Time::getMillisecondCounterHiRes();
 
+            const auto midi_callback = [r = WeakReference<WinRTInputWrapper>(this)](IMidiInPort*, IMidiMessageReceivedEventArgs* args)
+            {
+                if (auto* p = r.get())
+                    return p->midiInMessageReceived(args);
+
+                return S_OK;
+            };
+
             auto hr = midiPort->add_MessageReceived (
-                Callback<ITypedEventHandler<MidiInPort*, MidiMessageReceivedEventArgs*>> (
-                    [this](IMidiInPort*, IMidiMessageReceivedEventArgs* args) { return midiInMessageReceived (args); }
-                ).Get(),
+                Callback<ITypedEventHandler<MidiInPort*, MidiMessageReceivedEventArgs*>> (midi_callback).Get(),
                 &midiInMessageToken);
 
             if (FAILED (hr))
@@ -1742,6 +1754,7 @@ private:
         double startTime = 0;
         bool isStarted = false;
 
+        JUCE_DECLARE_WEAK_REFERENCEABLE(WinRTInputWrapper);
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WinRTInputWrapper);
     };
 
