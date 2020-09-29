@@ -51,7 +51,10 @@ target_compile_definitions(DemoRunner PRIVATE
     JUCE_USE_CAMERA=1
     JUCE_USE_CURL=1
     JUCE_USE_MP3AUDIOFORMAT=1
-    JUCE_WEB_BROWSER=1)
+    JUCE_WEB_BROWSER=1
+    JUCE_USE_WINRT_MIDI=1
+    JUCE_WINRT_MIDI_LOGGING=1
+        )
 
 target_link_libraries(DemoRunner PRIVATE
     juce::juce_analytics
@@ -65,6 +68,8 @@ target_link_libraries(DemoRunner PRIVATE
     juce::juce_video
     juce::juce_recommended_config_flags
     juce::juce_recommended_lto_flags
-    juce::juce_recommended_warning_flags)
+    juce::juce_recommended_warning_flags
+    $<$<CXX_COMPILER_ID:MSVC>:WindowsApp.lib> # TODO: Can we make the juce_audio_devices module link this lib?
+    )
 
 juce_add_bundle_resources_directory(DemoRunner ../Assets)
