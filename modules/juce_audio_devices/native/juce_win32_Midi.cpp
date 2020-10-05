@@ -742,13 +742,13 @@ public:
         if (! bleDeviceWatcher->start())
             throw std::runtime_error ("Failed to start the BLE device watcher");
 
-        inputDeviceWatcher = std::make_unique<MidiIODeviceWatcher<winrt_wrap::MidiInPort>>(*bleDeviceWatcher);
+        inputDeviceWatcher = std::make_unique<MidiIODeviceWatcher>(*bleDeviceWatcher, winrt_wrap::MidiInPort::GetDeviceSelector());
 
         // TODO: Can this happen?
         if (! inputDeviceWatcher->start())
             throw std::runtime_error ("Failed to start the midi input device watcher");
 
-        outputDeviceWatcher = std::make_unique<MidiIODeviceWatcher<winrt_wrap::MidiOutPort>>(*bleDeviceWatcher);
+        outputDeviceWatcher = std::make_unique<MidiIODeviceWatcher>(*bleDeviceWatcher, winrt_wrap::MidiOutPort::GetDeviceSelector());
 
         // TODO: Can this happen?
         if (! outputDeviceWatcher->start())
@@ -870,7 +870,9 @@ private:
                         if (midi_info.isConnected != is_connected)
                         {
                             JUCE_WINRT_MIDI_LOG ("BLE device connection status change: " << updatedDeviceId << " " << midi_info.containerID << " " << (is_connected ? "connected" : "disconnected"));
-                            listeners.call ([&midi_info] (Listener& l) { l.bleDeviceDisconnected (midi_info.containerID); });
+
+                            if (midi_info.isConnected && !is_connected)
+                                listeners.call ([&midi_info] (Listener& l) { l.bleDeviceDisconnected (midi_info.containerID); });
                         }
 
                         midi_info.isConnected = is_connected;
@@ -931,12 +933,11 @@ private:
     };
 
     //==============================================================================
-    template <typename PortType>
     struct MidiIODeviceWatcher final
     {
-        MidiIODeviceWatcher (const BLEDeviceWatcher& bleWatcher)
+        MidiIODeviceWatcher (const BLEDeviceWatcher& bleWatcher, const winrt::hstring& selectorString)
             : bleDeviceWatcher(bleWatcher),
-              watcher(createWatcher())
+              watcher(createWatcher(selectorString))
         {
             watcher.Added([this](const winrt_wrap::DeviceWatcher&, const winrt_wrap::DeviceInformation& info)
             {
@@ -977,7 +978,7 @@ private:
             });
         }
 
-        static winrt_wrap::DeviceWatcher createWatcher()
+        static winrt_wrap::DeviceWatcher createWatcher(const winrt::hstring& selectorString)
         {
             const std::vector<winrt::hstring> props {
                     L"System.Devices.ContainerId",
@@ -985,7 +986,7 @@ private:
                     L"System.Devices.Aep.IsConnected"
             };
 
-            return winrt_wrap::DeviceInformation::CreateWatcher(PortType::GetDeviceSelector(), props, winrt_wrap::DeviceInformationKind::DeviceInterface);
+            return winrt_wrap::DeviceInformation::CreateWatcher(selectorString, props, winrt_wrap::DeviceInformationKind::DeviceInterface);
         }
 
         bool start()
@@ -1078,14 +1079,15 @@ private:
     };
 
     //==============================================================================
-    template <typename IMIDIPort, typename MIDIPort>
+    template <typename PortType>
     class WinRTIOWrapper   : private BLEDeviceWatcher::Listener
     {
     public:
         WinRTIOWrapper (BLEDeviceWatcher& bleWatcher,
-                        MidiIODeviceWatcher<MIDIPort>& midiDeviceWatcher,
+                        MidiIODeviceWatcher& midiDeviceWatcher,
                         const String& deviceIdentifier)
-            : bleDeviceWatcher (bleWatcher)
+            : bleDeviceWatcher (bleWatcher),
+              midiPort(nullptr)
         {
             {
                 const ScopedLock lock (midiDeviceWatcher.deviceChanges);
@@ -1117,6 +1119,11 @@ private:
 
         virtual ~WinRTIOWrapper()
         {
+            if (midiPort != nullptr)
+                midiPort.Close();
+
+            midiPort = nullptr;
+
             bleDeviceWatcher.removeListener (this);
 
             disconnect();
@@ -1125,10 +1132,17 @@ private:
         //==============================================================================
         virtual void disconnect()
         {
+            JUCE_WINRT_MIDI_LOG("Disconnect MIDI port: " << deviceInfo.deviceID << " " << deviceInfo.name) ;
+
             if (midiPort != nullptr && isBLEDevice)
+            {
+                DBG("MidiPort Close");
                 midiPort.Close();
+            }
 
             midiPort = nullptr;
+
+            JUCE_WINRT_MIDI_LOG("Closed successfully");
         }
 
     private:
@@ -1155,16 +1169,16 @@ private:
         WinRTMIDIDeviceInfo deviceInfo;
         bool isBLEDevice = false;
 
-        IMIDIPort midiPort;
+        PortType midiPort;
     };
 
-    //==============================================================================
+
     struct WinRTInputWrapper final  : public InputWrapper,
-                                      private WinRTIOWrapper<winrt_wrap::IMidiInPort, winrt_wrap::MidiInPort>
+                                      private WinRTIOWrapper<winrt_wrap::MidiInPort>
 
     {
         WinRTInputWrapper (WinRTMidiService& service, MidiInput& input, const String& deviceIdentifier, MidiInputCallback& cb)
-            : WinRTIOWrapper <winrt_wrap::IMidiInPort, winrt_wrap::MidiInPort> (*service.bleDeviceWatcher, *service.inputDeviceWatcher, deviceIdentifier),
+            : WinRTIOWrapper <winrt_wrap::MidiInPort> (*service.bleDeviceWatcher, *service.inputDeviceWatcher, deviceIdentifier),
               inputDevice (input),
               callback (cb)
         {
@@ -1178,7 +1192,7 @@ private:
                 const auto start = Time::getMillisecondCounterHiRes();
                 auto now = start;
 
-                while (op.Status() == winrt_wrap::AsyncStatus::Started && (now - start) <= TimeoutMs);
+                while (op.Status() == winrt_wrap::AsyncStatus::Started && (now - start) <= TimeoutMs)
                 {
                     Thread::sleep(50);
                     now = Time::getMillisecondCounterHiRes();
@@ -1206,10 +1220,7 @@ private:
             });
         }
 
-        ~WinRTInputWrapper()
-        {
-            disconnect();
-        }
+        ~WinRTInputWrapper() = default;
 
         //==============================================================================
         void start() override
@@ -1238,7 +1249,7 @@ private:
         {
             stop();
 
-            WinRTIOWrapper<winrt_wrap::IMidiInPort, winrt_wrap::MidiInPort>::disconnect();
+            WinRTIOWrapper<winrt_wrap::MidiInPort>::disconnect();
         }
 
         //==============================================================================
@@ -1289,12 +1300,13 @@ private:
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WinRTInputWrapper);
     };
 
+
     //==============================================================================
     struct WinRTOutputWrapper final  : public OutputWrapper,
-                                       private WinRTIOWrapper <winrt_wrap::IMidiOutPort, winrt_wrap::MidiOutPort>
+                                       private WinRTIOWrapper <winrt_wrap::IMidiOutPort>
     {
         WinRTOutputWrapper (WinRTMidiService& service, const String& deviceIdentifier)
-            : WinRTIOWrapper <winrt_wrap::IMidiOutPort, winrt_wrap::MidiOutPort> (*service.bleDeviceWatcher, *service.outputDeviceWatcher, deviceIdentifier),
+            : WinRTIOWrapper <winrt_wrap::IMidiOutPort> (*service.bleDeviceWatcher, *service.outputDeviceWatcher, deviceIdentifier),
               buffer(65536)
         {
             {
@@ -1318,6 +1330,8 @@ private:
 
             if (midiPort == nullptr)
                 throw std::runtime_error ("Timed out waiting for midi output port creation");
+
+            JUCE_WINRT_MIDI_LOG("Port open success " << String(winrt::to_string(midiPort.DeviceId())));
         }
 
         //==============================================================================
@@ -1344,8 +1358,7 @@ private:
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WinRTOutputWrapper);
     };
 
-    std::unique_ptr<MidiIODeviceWatcher<winrt_wrap::MidiInPort>>  inputDeviceWatcher;
-    std::unique_ptr<MidiIODeviceWatcher<winrt_wrap::MidiOutPort>> outputDeviceWatcher;
+    std::unique_ptr<MidiIODeviceWatcher>  inputDeviceWatcher, outputDeviceWatcher;
     std::unique_ptr<BLEDeviceWatcher> bleDeviceWatcher;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WinRTMidiService)
@@ -1543,3 +1556,4 @@ void MidiOutput::sendMessageNow (const MidiMessage& message)
 }
 
 } // namespace juce
+                                                                                                                                                          
