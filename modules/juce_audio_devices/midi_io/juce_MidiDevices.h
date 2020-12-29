@@ -264,7 +264,7 @@ public:
     */
     static std::unique_ptr<MidiOutput> openDevice (const String& deviceIdentifier);
 
-   #if JUCE_LINUX || JUCE_MAC || JUCE_IOS || DOXYGEN
+   #if JUCE_WINDOWS || JUCE_LINUX || JUCE_MAC || JUCE_IOS || DOXYGEN
     /** This will try to create a new midi output device (only available on Linux, macOS and iOS).
 
         This will attempt to create a new midi output device with the specified name that other

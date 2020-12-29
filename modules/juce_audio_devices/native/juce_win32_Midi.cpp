@@ -26,6 +26,8 @@
  #define DRV_QUERYDEVICEINTERFACESIZE (DRV_RESERVED + 13)
 #endif
 
+#include "teVirtualMIDI.h"
+
 namespace juce
 {
 
@@ -2031,6 +2033,37 @@ MidiOutput::~MidiOutput()
 void MidiOutput::sendMessageNow (const MidiMessage& message)
 {
     static_cast<MidiServiceType::OutputWrapper*> (internal)->sendMessageNow (message);
+}
+
+
+//======================================================================================================================
+struct Win32VirtualMidiOutput : public MidiServiceType::OutputWrapper
+{
+    explicit Win32VirtualMidiOutput(const String& deviceName)
+            : teMidiPort(virtualMIDICreatePortEx2(deviceName.toWideCharPointer(), nullptr, (DWORD_PTR) nullptr, 0xFFFF, TE_VM_FLAGS_PARSE_RX | TE_VM_FLAGS_INSTANTIATE_TX_ONLY))
+    {
+
+    }
+
+    ~Win32VirtualMidiOutput() override { virtualMIDIClosePort(teMidiPort); }
+
+    String getDeviceIdentifier() override { return {}; }
+    String getDeviceName() override { return {}; }
+
+    void sendMessageNow(const MidiMessage& msg) override
+    {
+        virtualMIDISendData(teMidiPort, (LPBYTE) msg.getRawData(), msg.getRawDataSize());
+    }
+
+    LPVM_MIDI_PORT teMidiPort;
+};
+
+std::unique_ptr<MidiOutput> MidiOutput::createNewDevice(const String& deviceName)
+{
+    std::unique_ptr<MidiOutput> midiOutput(new MidiOutput(deviceName, String()));
+    midiOutput->internal = new Win32VirtualMidiOutput(deviceName);
+
+    return midiOutput;
 }
 
 } // namespace juce
