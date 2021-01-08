@@ -2030,40 +2030,162 @@ MidiOutput::~MidiOutput()
     delete static_cast<MidiServiceType::OutputWrapper*> (internal);
 }
 
-void MidiOutput::sendMessageNow (const MidiMessage& message)
+void MidiOutput::sendMessageNow(const MidiMessage& message)
 {
-    static_cast<MidiServiceType::OutputWrapper*> (internal)->sendMessageNow (message);
+    static_cast<MidiServiceType::OutputWrapper*> (internal)->sendMessageNow(message);
 }
 
+struct Win32VirtualMidi
+{
+    using CallbackType = std::function<void(const uint8_t*, size_t)>;
+
+    static constexpr auto MaxSysExLength = 0xFFFF;
+
+    Win32VirtualMidi(const String& deviceName)
+            : teMidiPort(virtualMIDICreatePortEx2(deviceName.toWideCharPointer(), vmCallback, (DWORD_PTR) this, MaxSysExLength, TE_VM_FLAGS_PARSE_RX)),
+              deviceName(deviceName)
+    {
+        DBG("Create virtual MIDI port: " << deviceName);
+    }
+
+    ~Win32VirtualMidi()
+    {
+        DBG("Shut down virtual MIDI port: " << deviceName);
+
+        virtualMIDIClosePort(teMidiPort);
+    }
+
+    void transmit(const uint8_t* bytes, size_t length) const
+    {
+        virtualMIDISendData(teMidiPort, (LPBYTE) bytes, static_cast<size_t>(length));
+    }
+
+    void startRx(CallbackType cb) { callback = std::move(cb); }
+
+    void stopRx() { callback = {};}
+
+    void startTx() { started = true; }
+
+    void stopTx() { started = false; }
+
+    [[nodiscard]] bool isBeingUsed() const { return started || callback != nullptr; }
+
+    [[nodiscard]] const String& getName() const { return deviceName; }
+
+private:
+    static void CALLBACK vmCallback(LPVM_MIDI_PORT, LPBYTE midiDataBytes, DWORD length, DWORD_PTR dwCallbackInstance)
+    {
+        if (const auto* inst = reinterpret_cast<const Win32VirtualMidi*>(dwCallbackInstance); inst != nullptr)
+            inst->callback(midiDataBytes, length);
+    }
+
+    LPVM_MIDI_PORT teMidiPort;
+
+    CallbackType callback;
+
+    bool started = false;
+
+    const String deviceName;
+};
+
+static std::map<String, Win32VirtualMidi> virtualMidiPorts;
+
+// TODO: Need to make sure no duplicates are created
+Win32VirtualMidi& getOrCreatePort(const String& name)
+{
+    const auto[it, was_inserted] = virtualMidiPorts.emplace(name, name);
+
+    DBG("getOrCreatePort() " << name << ", was created? " << (was_inserted ? "yes" : "no"));
+
+    ignoreUnused(was_inserted);
+    return it->second;
+}
+
+void closePortIfNecessary(const String& name)
+{
+    if (const auto it = virtualMidiPorts.find(name); it != virtualMidiPorts.end())
+        if (!it->second.isBeingUsed())
+            virtualMidiPorts.erase(it);
+}
 
 //======================================================================================================================
 struct Win32VirtualMidiOutput : public MidiServiceType::OutputWrapper
 {
-    explicit Win32VirtualMidiOutput(const String& deviceName)
-            : teMidiPort(virtualMIDICreatePortEx2(deviceName.toWideCharPointer(), nullptr, (DWORD_PTR) nullptr, 0xFFFF, TE_VM_FLAGS_PARSE_RX | TE_VM_FLAGS_INSTANTIATE_TX_ONLY))
+    explicit Win32VirtualMidiOutput(const MidiOutput& out)
+            : output(out),
+              port(getOrCreatePort(out.getName()))
     {
-
+        port.startTx();
     }
 
-    ~Win32VirtualMidiOutput() override { virtualMIDIClosePort(teMidiPort); }
-
-    String getDeviceIdentifier() override { return {}; }
-    String getDeviceName() override { return {}; }
-
-    void sendMessageNow(const MidiMessage& msg) override
+    ~Win32VirtualMidiOutput() override
     {
-        virtualMIDISendData(teMidiPort, (LPBYTE) msg.getRawData(), msg.getRawDataSize());
+        port.stopTx();
+
+        closePortIfNecessary(port.getName());
     }
 
-    LPVM_MIDI_PORT teMidiPort;
+    String getDeviceIdentifier() override { return output.getIdentifier(); }
+    String getDeviceName() override { return output.getName(); }
+
+    void sendMessageNow(const MidiMessage& msg) override { port.transmit(msg.getRawData(), msg.getRawDataSize()); }
+
+    const MidiOutput& output;
+    Win32VirtualMidi& port;
 };
 
 std::unique_ptr<MidiOutput> MidiOutput::createNewDevice(const String& deviceName)
 {
     std::unique_ptr<MidiOutput> midiOutput(new MidiOutput(deviceName, String()));
-    midiOutput->internal = new Win32VirtualMidiOutput(deviceName);
+    midiOutput->internal = new Win32VirtualMidiOutput(*midiOutput);
 
     return midiOutput;
+}
+
+//======================================================================================================================
+struct Win32VirtualMidiInput : public MidiServiceType::InputWrapper
+{
+    Win32VirtualMidiInput(MidiInput& inp, MidiInputCallback* cb)
+            : input(inp),
+              callback(cb),
+              port(getOrCreatePort(inp.getName()))
+    {
+        DBG("Create virtual MIDI input: " << getDeviceName());
+
+        port.startRx([this](const uint8_t* bytes, size_t length)
+        {
+            DBG("handleMidiData " << length);
+
+            callback->handleIncomingMidiMessage(&input, juce::MidiMessage(bytes, length));
+        });
+    }
+
+    ~Win32VirtualMidiInput() override
+    {
+        port.stopRx();
+
+        closePortIfNecessary(port.getName());
+    }
+
+    String getDeviceIdentifier() override { return input.getIdentifier(); }
+    String getDeviceName() override { return input.getName(); }
+
+    void start() override {}
+
+    void stop() override {}
+
+    MidiInput        & input;
+    MidiInputCallback* callback;
+
+    Win32VirtualMidi& port;
+};
+
+std::unique_ptr<MidiInput> MidiInput::createNewDevice(const String& deviceName, MidiInputCallback* callback)
+{
+    std::unique_ptr<MidiInput> midiInput(new MidiInput(deviceName, String()));
+    midiInput->internal = new Win32VirtualMidiInput(*midiInput, callback);
+
+    return midiInput;
 }
 
 } // namespace juce
