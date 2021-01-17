@@ -2079,7 +2079,7 @@ struct Win32VirtualMidi
 private:
     static void CALLBACK vmCallback(LPVM_MIDI_PORT, LPBYTE midiDataBytes, DWORD length, DWORD_PTR dwCallbackInstance)
     {
-        if (const auto* inst = reinterpret_cast<const Win32VirtualMidi*>(dwCallbackInstance); inst != nullptr)
+        if (const auto* inst = reinterpret_cast<const Win32VirtualMidi*>(dwCallbackInstance); inst != nullptr && inst->callback != nullptr)
             inst->callback(midiDataBytes, length);
     }
 
