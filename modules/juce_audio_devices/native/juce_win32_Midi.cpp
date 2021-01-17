@@ -2041,9 +2041,9 @@ struct Win32VirtualMidi
 
     static constexpr auto MaxSysExLength = 0xFFFF;
 
-    Win32VirtualMidi(const String& deviceName)
-            : teMidiPort(virtualMIDICreatePortEx2(deviceName.toWideCharPointer(), vmCallback, (DWORD_PTR) this, MaxSysExLength, TE_VM_FLAGS_PARSE_RX)),
-              deviceName(deviceName)
+    explicit Win32VirtualMidi(const String& name)
+            : deviceName(name),
+              teMidiPort(virtualMIDICreatePortEx2(deviceName.toWideCharPointer(), vmCallback, (DWORD_PTR) this, MaxSysExLength, TE_VM_FLAGS_PARSE_RX))
     {
         DBG("Create virtual MIDI port: " << deviceName);
     }
@@ -2062,13 +2062,17 @@ struct Win32VirtualMidi
 
     void startRx(CallbackType cb) { callback = std::move(cb); }
 
-    void stopRx() { callback = {};}
+    void stopRx() { callback = {}; }
 
     void startTx() { started = true; }
 
     void stopTx() { started = false; }
 
-    [[nodiscard]] bool isBeingUsed() const { return started || callback != nullptr; }
+    [[nodiscard]] bool isOutputConnected() const { return started; }
+
+    [[nodiscard]] bool isInputConnected() const { return callback != nullptr; }
+
+    [[nodiscard]] bool isBeingUsed() const { return isInputConnected() || isOutputConnected(); }
 
     [[nodiscard]] const String& getName() const { return deviceName; }
 
@@ -2079,18 +2083,17 @@ private:
             inst->callback(midiDataBytes, length);
     }
 
+    const String deviceName;
+
     LPVM_MIDI_PORT teMidiPort;
 
-    CallbackType callback;
+    CallbackType callback = nullptr;
 
     bool started = false;
-
-    const String deviceName;
 };
 
 static std::map<String, Win32VirtualMidi> virtualMidiPorts;
 
-// TODO: Need to make sure no duplicates are created
 Win32VirtualMidi& getOrCreatePort(const String& name)
 {
     const auto[it, was_inserted] = virtualMidiPorts.emplace(name, name);
@@ -2098,14 +2101,8 @@ Win32VirtualMidi& getOrCreatePort(const String& name)
     DBG("getOrCreatePort() " << name << ", was created? " << (was_inserted ? "yes" : "no"));
 
     ignoreUnused(was_inserted);
-    return it->second;
-}
 
-void closePortIfNecessary(const String& name)
-{
-    if (const auto it = virtualMidiPorts.find(name); it != virtualMidiPorts.end())
-        if (!it->second.isBeingUsed())
-            virtualMidiPorts.erase(it);
+    return it->second;
 }
 
 //======================================================================================================================
@@ -2121,14 +2118,15 @@ struct Win32VirtualMidiOutput : public MidiServiceType::OutputWrapper
     ~Win32VirtualMidiOutput() override
     {
         port.stopTx();
-
-        closePortIfNecessary(port.getName());
     }
 
     String getDeviceIdentifier() override { return output.getIdentifier(); }
     String getDeviceName() override { return output.getName(); }
 
-    void sendMessageNow(const MidiMessage& msg) override { port.transmit(msg.getRawData(), msg.getRawDataSize()); }
+    void sendMessageNow(const MidiMessage& msg) override
+    {
+        port.transmit(msg.getRawData(), msg.getRawDataSize());
+    }
 
     const MidiOutput& output;
     Win32VirtualMidi& port;
@@ -2163,8 +2161,6 @@ struct Win32VirtualMidiInput : public MidiServiceType::InputWrapper
     ~Win32VirtualMidiInput() override
     {
         port.stopRx();
-
-        closePortIfNecessary(port.getName());
     }
 
     String getDeviceIdentifier() override { return input.getIdentifier(); }
