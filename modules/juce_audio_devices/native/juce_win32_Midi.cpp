@@ -2046,13 +2046,17 @@ struct Win32VirtualMidi
               teMidiPort(virtualMIDICreatePortEx2(deviceName.toWideCharPointer(), vmCallback, (DWORD_PTR) this, MaxSysExLength, TE_VM_FLAGS_PARSE_RX))
     {
         DBG("Create virtual MIDI port: " << deviceName);
+
+        if (teMidiPort == nullptr)
+            DBG("Failed to create virtual midi port");
     }
 
     ~Win32VirtualMidi()
     {
         DBG("Shut down virtual MIDI port: " << deviceName);
 
-        virtualMIDIClosePort(teMidiPort);
+        if (teMidiPort != nullptr)
+            virtualMIDIClosePort(teMidiPort);
     }
 
     void transmit(const uint8_t* bytes, size_t length) const
@@ -2166,9 +2170,9 @@ struct Win32VirtualMidiInput : public MidiServiceType::InputWrapper
     String getDeviceIdentifier() override { return input.getIdentifier(); }
     String getDeviceName() override { return input.getName(); }
 
-    void start() override {}
+    void start() override { }
 
-    void stop() override {}
+    void stop() override { }
 
     MidiInput        & input;
     MidiInputCallback* callback;
